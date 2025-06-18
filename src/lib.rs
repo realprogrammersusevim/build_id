@@ -47,7 +47,7 @@
 use once_cell::sync::Lazy;
 use std::{
     any::TypeId,
-    hash::{Hash, Hasher},
+    hash::{Hash, Hasher, DefaultHasher},
     io,
 };
 use uuid::Uuid;
@@ -91,52 +91,53 @@ pub fn get() -> Uuid {
 }
 
 #[allow(clippy::needless_pass_by_value)]
-fn from_header<H: Hasher>(_hasher: H) -> Result<H, ()> {
+fn from_header<H: Hasher>(_hasher: &mut H) -> Result<(), ()> {
     // LC_UUID https://opensource.apple.com/source/libsecurity_codesigning/libsecurity_codesigning-55037.6/lib/machorep.cpp https://stackoverflow.com/questions/10119700/how-to-get-mach-o-uuid-of-a-running-process
     // .note.gnu.build-id https://github.com/golang/go/issues/21564 https://github.com/golang/go/blob/178307c3a72a9da3d731fecf354630761d6b246c/src/cmd/go/internal/buildid/buildid.go
     Err(())
 }
-fn from_exe<H: Hasher>(mut hasher: H) -> Result<H, ()> {
+fn from_exe<H: Hasher>(hasher: &mut H) -> Result<(), ()> {
     #[cfg(not(target_arch = "wasm32"))]
     {
         if cfg!(miri) {
             return Err(());
         }
-        let file = palaver::env::exe().map_err(drop)?;
-        let _ = io::copy(&mut &file, &mut HashWriter(&mut hasher)).map_err(drop)?;
-        Ok(hasher)
+        let file = std::env::current_exe().map_err(drop)?;
+        let mut f = std::fs::File::open(&file).map_err(drop)?;
+        let _ = io::copy(&mut f, &mut HashWriter(hasher)).map_err(drop)?;
+        Ok(())
     }
     #[cfg(target_arch = "wasm32")]
     {
-        let _ = &mut hasher;
+        let _ = hasher;
         Err(())
     }
 }
-fn from_type_id<H: Hasher>(mut hasher: H) -> H {
+fn from_type_id<H: Hasher>(hasher: &mut H) {
     fn type_id_of<T: 'static>(_: &T) -> TypeId {
         TypeId::of::<T>()
     }
-    TypeId::of::<()>().hash(&mut hasher);
-    TypeId::of::<u8>().hash(&mut hasher);
+    TypeId::of::<()>().hash(hasher);
+    TypeId::of::<u8>().hash(hasher);
     let a = |x: ()| x;
-    type_id_of(&a).hash(&mut hasher);
+    type_id_of(&a).hash(hasher);
     let b = |x: u8| x;
-    type_id_of(&b).hash(&mut hasher);
-    hasher
+    type_id_of(&b).hash(hasher);
 }
 
 fn calculate() -> Uuid {
-    let hasher = twox_hash::XxHash64::with_seed(0);
+    let mut hasher = DefaultHasher::new();
 
-    let hasher = from_header(hasher.clone())
-        .or_else(|()| from_exe(hasher.clone()))
-        .unwrap_or(hasher);
-    let mut hasher = from_type_id(hasher);
+    let _ = from_header(&mut hasher);
+    let _ = from_exe(&mut hasher);
+    from_type_id(&mut hasher);
 
     let mut bytes = [0; 16];
-    <byteorder::NativeEndian as byteorder::ByteOrder>::write_u64(&mut bytes[..8], hasher.finish());
+    let first = hasher.finish();
+    bytes[..8].copy_from_slice(&first.to_ne_bytes());
     hasher.write_u8(0);
-    <byteorder::NativeEndian as byteorder::ByteOrder>::write_u64(&mut bytes[8..], hasher.finish());
+    let second = hasher.finish();
+    bytes[8..].copy_from_slice(&second.to_ne_bytes());
 
     uuid::Builder::from_bytes(bytes)
         .with_variant(uuid::Variant::RFC4122)
@@ -144,8 +145,8 @@ fn calculate() -> Uuid {
         .into_uuid()
 }
 
-struct HashWriter<T: Hasher>(T);
-impl<T: Hasher> io::Write for HashWriter<T> {
+struct HashWriter<'a, H: Hasher>(&'a mut H);
+impl<'a, H: Hasher> io::Write for HashWriter<'a, H> {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
         self.0.write(buf);
         Ok(buf.len())

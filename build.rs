@@ -4,6 +4,6 @@
 // *actually* linking to anything, just making sure that we're the only
 // build_id in use.
 fn main() {
-	// we don't need to rebuild for anything else
-	println!("cargo:rerun-if-changed=build.rs");
+    // we don't need to rebuild for anything else
+    println!("cargo:rerun-if-changed=build.rs");
 }
